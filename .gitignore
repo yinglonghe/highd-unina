@@ -1,3 +1,6 @@
+*.ipynb
+*.pbs
+*.out
 outputs/
 
 # Byte-compiled / optimized / DLL files
