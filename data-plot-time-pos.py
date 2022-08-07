@@ -11,7 +11,7 @@ from plotly.offline import plot
 
 ### Global variables ###
 indir = './outputs/tracks-slurm/'
-outdir = './outputs/tracks-plt/'
+outdir = './outputs/tracks-plt/time-pos/'
 os.makedirs(outdir, exist_ok=True)
 
 

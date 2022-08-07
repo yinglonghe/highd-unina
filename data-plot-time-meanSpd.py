@@ -14,7 +14,7 @@ from scipy.interpolate import interp1d
 
 ### Global variables ###
 indir = './outputs/tracks-slurm/'
-outdir = './outputs/tracks-test/'
+outdir = './outputs/tracks-plt/time-meanSpd/'
 os.makedirs(outdir, exist_ok=True)
 
 

@@ -1,7 +1,8 @@
-*.ipynb
+#*.ipynb
 *.pbs
 *.out
 outputs/
+backup/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

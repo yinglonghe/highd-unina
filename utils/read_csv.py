@@ -1,11 +1,11 @@
 import os
-import pandas
+import pandas as pd
 import numpy as np
-from IPython.display import display
 import multiprocessing
 from itertools import product
 from functools import partial
 from tqdm import tqdm
+import shutil
 
 
 # TRACK FILE
@@ -69,9 +69,8 @@ N_TRUCKS = "numTrucks"
 UPPER_LANE_MARKINGS = "upperLaneMarkings"
 LOWER_LANE_MARKINGS = "lowerLaneMarkings"
 
-os.makedirs('test', exist_ok=True)
-def process_track_data(all_track_df, df_stc, df_rec):
 
+def traffic_calculation(l, all_track_df=None, df_stc=None, df_rec=None, tmp_path=None):
     L = 0.424  # length of the location under study (in km)
     upperLaneMarkings = np.fromstring(df_rec['upperLaneMarkings'][0], sep=";")
     lowerLaneMarkings = np.fromstring(df_rec['lowerLaneMarkings'][0], sep=";")
@@ -81,93 +80,114 @@ def process_track_data(all_track_df, df_stc, df_rec):
 
     #loop through the tracksMeta line-by-line, each line is a vehicle
     df_stc.reset_index(drop=True, inplace=True)
+    
+    arr_new = []
+    trackID = df_stc["id"][l]
+    drivingDirection = df_stc["drivingDirection"][l]  #1 for upper lanes (drive to the left), and 2 for lower lanes (drive to the right)
 
-    df = pandas.DataFrame()
-    for l in tqdm(range(0,len(df_stc.index)), mininterval=120):
-#    for l in range(0,len(df_stc.index)):
-        arr_new = []
-        trackID = df_stc["id"][l]
-        drivingDirection = df_stc["drivingDirection"][l]  #1 for upper lanes (drive to the left), and 2 for lower lanes (drive to the right)
+    track_df = all_track_df[all_track_df["id"]==trackID].reset_index(drop=True)
+    if drivingDirection==1:
+        track_df["xVelocity"]=-track_df["xVelocity"]
+        track_df["xAcceleration"]=-track_df["xAcceleration"]
+        track_df["precedingXVelocity"]=-track_df["precedingXVelocity"]
 
-        track_df = all_track_df[all_track_df["id"]==trackID].reset_index(drop=True)
+    # loop through each line in the track data
+    for t in range(0,len(track_df.index)):
+        frameID = track_df['frame'][t]
+
+        # Find traffic-related variables: Density and traffic mean speed
         if drivingDirection==1:
-            track_df["xVelocity"]=-track_df["xVelocity"]
-            track_df["xAcceleration"]=-track_df["xAcceleration"]
-            track_df["precedingXVelocity"]=-track_df["precedingXVelocity"]
+            traffic_density = len(all_track_df[(all_track_df["frame"]==frameID) & (all_track_df["laneId"].isin(upperLaneId))]) / (L*len(upperLaneId))
+        else: traffic_density = len(all_track_df[(all_track_df["frame"]==frameID) & (all_track_df["laneId"].isin(lowerLaneId))]) / (L*len(lowerLaneId))
 
-        # loop through each line in the track data
-        for t in range(0,len(track_df.index)):
-            frameID = track_df['frame'][t]
+        if drivingDirection==1:
+            traffic_speed = -np.mean(all_track_df.loc[(all_track_df["frame"]==frameID) & (all_track_df["laneId"].isin(upperLaneId)),"xVelocity"])
+        else: traffic_speed = np.mean(all_track_df.loc[(all_track_df["frame"]==frameID) & (all_track_df["laneId"].isin(lowerLaneId)),"xVelocity"])
 
-            # Find traffic-related variables: Density and traffic mean speed
-            if drivingDirection==1:
-                traffic_density = len(all_track_df[(all_track_df["frame"]==frameID) & (all_track_df["laneId"].isin(upperLaneId))]) / (L*len(upperLaneId))
-            else: traffic_density = len(all_track_df[(all_track_df["frame"]==frameID) & (all_track_df["laneId"].isin(lowerLaneId))]) / (L*len(lowerLaneId))
-            
-            if drivingDirection==1:
-                traffic_speed = -np.mean(all_track_df.loc[(all_track_df["frame"]==frameID) & (all_track_df["laneId"].isin(upperLaneId)),"xVelocity"])
-            else: traffic_speed = np.mean(all_track_df.loc[(all_track_df["frame"]==frameID) & (all_track_df["laneId"].isin(lowerLaneId)),"xVelocity"])
-            
-            # Now look at the all_track_df data to find the location and speed of surrounding vehicles for each vehicle we keep [x_location,speed]
-            if track_df["leftPrecedingId"][t]!=0:
-                leftPreceding_df = np.array(all_track_df.loc[(all_track_df["id"] == track_df["leftPrecedingId"][t]) & (all_track_df["frame"] == track_df["frame"][t])].values[0][nearby_index])
-                leftPreceding_df[0] = np.abs(leftPreceding_df[0]-track_df["x"][t])
-                leftPreceding_df[1]= np.abs(leftPreceding_df[1])
-            else: leftPreceding_df = np.array([0,0])
+        # Now look at the all_track_df data to find the location and speed of surrounding vehicles for each vehicle we keep [x_location,speed]
+        if track_df["leftPrecedingId"][t]!=0:
+            leftPreceding_df = np.array(all_track_df.loc[(all_track_df["id"] == track_df["leftPrecedingId"][t]) & (all_track_df["frame"] == track_df["frame"][t])].values[0][nearby_index])
+            leftPreceding_df[0] = np.abs(leftPreceding_df[0]-track_df["x"][t])
+            leftPreceding_df[1]= np.abs(leftPreceding_df[1])
+        else: leftPreceding_df = np.array([0,0])
 
-            if track_df["leftFollowingId"][t]!=0:
-                leftFollowing_df = np.array(all_track_df.loc[(all_track_df["id"] == track_df["leftFollowingId"][t]) & (all_track_df["frame"] == track_df["frame"][t])].values[0][nearby_index])
-                leftFollowing_df[0] = np.abs(leftFollowing_df[0]-track_df["x"][t])
-                leftFollowing_df[1] = np.abs(leftFollowing_df[1])
-            else: leftFollowing_df = np.array([0,0])
+        if track_df["leftFollowingId"][t]!=0:
+            leftFollowing_df = np.array(all_track_df.loc[(all_track_df["id"] == track_df["leftFollowingId"][t]) & (all_track_df["frame"] == track_df["frame"][t])].values[0][nearby_index])
+            leftFollowing_df[0] = np.abs(leftFollowing_df[0]-track_df["x"][t])
+            leftFollowing_df[1] = np.abs(leftFollowing_df[1])
+        else: leftFollowing_df = np.array([0,0])
 
-            if track_df["leftAlongsideId"][t]!=0:
-                leftAlongside_df = np.array(all_track_df.loc[(all_track_df["id"] == track_df["leftAlongsideId"][t]) & (all_track_df["frame"] == track_df["frame"][t])].values[0][nearby_index])
-                leftAlongside_df[0] = np.abs(leftAlongside_df[0]-track_df["x"][t])
-                leftAlongside_df[1] = np.abs(leftAlongside_df[1])
-            else: leftAlongside_df = np.array([0,0])
-            
+        if track_df["leftAlongsideId"][t]!=0:
+            leftAlongside_df = np.array(all_track_df.loc[(all_track_df["id"] == track_df["leftAlongsideId"][t]) & (all_track_df["frame"] == track_df["frame"][t])].values[0][nearby_index])
+            leftAlongside_df[0] = np.abs(leftAlongside_df[0]-track_df["x"][t])
+            leftAlongside_df[1] = np.abs(leftAlongside_df[1])
+        else: leftAlongside_df = np.array([0,0])
 
-            if track_df["rightPrecedingId"][t]!=0:
-                rightPreceding_df = np.array(all_track_df.loc[(all_track_df["id"] == track_df["rightPrecedingId"][t]) & (all_track_df["frame"] == track_df["frame"][t])].values[0][nearby_index])
-                rightPreceding_df[0] = np.abs(rightPreceding_df[0]-track_df["x"][t])
-                rightPreceding_df[1] = np.abs(rightPreceding_df[1])
-            else: rightPreceding_df = np.array([0,0])
 
-            if track_df["rightAlongsideId"][t]!=0:
-                rightAlongside_df = np.array(all_track_df.loc[(all_track_df["id"] == track_df["rightAlongsideId"][t]) & (all_track_df["frame"] == track_df["frame"][t])].values[0][nearby_index])
-                rightAlongside_df[0] = np.abs(rightAlongside_df[0]-track_df["x"][t]) 
-                rightAlongside_df[1] = np.abs(rightAlongside_df[1])
-            else: rightAlongside_df = np.array([0,0])
+        if track_df["rightPrecedingId"][t]!=0:
+            rightPreceding_df = np.array(all_track_df.loc[(all_track_df["id"] == track_df["rightPrecedingId"][t]) & (all_track_df["frame"] == track_df["frame"][t])].values[0][nearby_index])
+            rightPreceding_df[0] = np.abs(rightPreceding_df[0]-track_df["x"][t])
+            rightPreceding_df[1] = np.abs(rightPreceding_df[1])
+        else: rightPreceding_df = np.array([0,0])
 
-            if track_df["rightFollowingId"][t]!=0:
-                rightFollowing_df = np.array(all_track_df.loc[(all_track_df["id"] == track_df["rightFollowingId"][t]) & (all_track_df["frame"] == track_df["frame"][t])].values[0][nearby_index])
-                rightFollowing_df[0] = np.abs(rightFollowing_df[0]-track_df["x"][t])
-                rightFollowing_df[1] = np.abs(rightFollowing_df[1])
-            else: rightFollowing_df = np.array([0,0])
-            
-            #The output of the car-following model is the acceleration
-#            Acceleration = np.array(track_df.loc[t+1,"xAcceleration"])
-            # Combine the whole line of data
-            line_new = np.hstack([frameID, leftPreceding_df, leftAlongside_df, leftFollowing_df, rightPreceding_df, rightAlongside_df, rightFollowing_df, traffic_density, traffic_speed])
-            
-            arr_new.append(line_new)
+        if track_df["rightAlongsideId"][t]!=0:
+            rightAlongside_df = np.array(all_track_df.loc[(all_track_df["id"] == track_df["rightAlongsideId"][t]) & (all_track_df["frame"] == track_df["frame"][t])].values[0][nearby_index])
+            rightAlongside_df[0] = np.abs(rightAlongside_df[0]-track_df["x"][t]) 
+            rightAlongside_df[1] = np.abs(rightAlongside_df[1])
+        else: rightAlongside_df = np.array([0,0])
 
-        df_new = pandas.DataFrame(arr_new, 
-            columns =  ['frame', 'Left_Pre_X', 'Left_Pre_Speed', 'Left_Al_X', 'Left_Al_Speed', 'Left_Fol_X', 'Left_Fol_Speed',
-                'Right_Pre_X', 'Right_Pre_Speed', 'Right_Al_X', 'Right_Al_Speed', 'Right_Fol_X', 'Right_Fol_Speed',
-                'traffic_density', 'traffic_speed'])        
-        df_comb = track_df.merge(df_new, how='right', on='frame')
-#        df_comb.to_csv(f'test/test_{l}.csv')
+        if track_df["rightFollowingId"][t]!=0:
+            rightFollowing_df = np.array(all_track_df.loc[(all_track_df["id"] == track_df["rightFollowingId"][t]) & (all_track_df["frame"] == track_df["frame"][t])].values[0][nearby_index])
+            rightFollowing_df[0] = np.abs(rightFollowing_df[0]-track_df["x"][t])
+            rightFollowing_df[1] = np.abs(rightFollowing_df[1])
+        else: rightFollowing_df = np.array([0,0])
 
-        df = pandas.concat([df, df_comb])
+        # Combine the whole line of data
+        line_new = np.hstack([frameID, leftPreceding_df, leftAlongside_df, leftFollowing_df, rightPreceding_df, rightAlongside_df, rightFollowing_df, traffic_density, traffic_speed])
 
-#    df.to_csv(f'test/all-test.csv')
+        arr_new.append(line_new)
+        
+    df_new = pd.DataFrame(arr_new, 
+        columns =  ['frame', 'Left_Pre_X', 'Left_Pre_Speed', 'Left_Al_X', 'Left_Al_Speed', 'Left_Fol_X', 'Left_Fol_Speed',
+            'Right_Pre_X', 'Right_Pre_Speed', 'Right_Al_X', 'Right_Al_Speed', 'Right_Fol_X', 'Right_Fol_Speed',
+            'traffic_density', 'traffic_speed'])        
+    df_comb = track_df.merge(df_new, how='right', on='frame')
 
+    df_comb.to_pickle(tmp_path + str(int(l)) + '_data.pkl')
+    
+
+def process_track_data(idx_str, all_track_df, df_stc, df_rec):
+
+    tmp_path = './outputs/tmp/' + idx_str + '_tmp/'
+    os.makedirs(tmp_path, exist_ok=True)
+    
+    iter = list(range(0,len(df_stc.index)))
+    cpu_cnt = multiprocessing.cpu_count()
+    print(f"CPU Count: {cpu_cnt}")
+    pool = multiprocessing.Pool(processes=cpu_cnt)
+    pool.map(partial(traffic_calculation, \
+        all_track_df = all_track_df,
+        df_stc = df_stc,
+        df_rec = df_rec,
+        tmp_path=tmp_path), 
+        iter)
+    pool.close()
+    pool.join()
+    
+    # For debug
+    # iter = list(range(0,5))
+    # for l in iter: # len(df_stc.index)):
+    #     traffic_calculation(l, all_track_df = all_track_df, df_stc = df_stc, df_rec=df_rec, tmp_path=tmp_path)
+
+    df = pd.DataFrame()
+    for l in iter:
+        df = pd.concat([df, pd.read_pickle(tmp_path + str(int(l)) + '_data.pkl')])
+    
+    shutil.rmtree(tmp_path)
     return df
         
 
-def read_track_csv(arguments, df_stc, df_rec):
+def read_track_csv(arguments, idx_str, df_stc, df_rec):
     """
     This method reads the tracks file from highD data.
 
@@ -175,8 +195,8 @@ def read_track_csv(arguments, df_stc, df_rec):
     :return: a list containing all tracks as dictionaries.
     """
     # Read the csv file, convert it into a useful data structure
-    df = pandas.read_csv(arguments["input_path"])
-    df = process_track_data(df, df_stc, df_rec)
+    df = pd.read_csv(arguments["input_path"])
+    df = process_track_data(idx_str, df, df_stc, df_rec)
 
     # Use groupby to aggregate track info. Less error prone than iterating over the data.
     grouped = df.groupby([TRACK_ID], sort=False)
@@ -184,13 +204,8 @@ def read_track_csv(arguments, df_stc, df_rec):
     tracks = [None] * grouped.ngroups
     current_track = 0
     for group_id, rows in grouped:
-#        bounding_boxes = np.transpose(np.array([rows[X].values,
-#                                                rows[Y].values,
-#                                                rows[WIDTH].values,
-#                                                rows[HEIGHT].values]))
         tracks[current_track] = {TRACK_ID: np.int64(group_id),  # for compatibility, int would be more space efficient
                                  FRAME: rows[FRAME].values,
-#                                 BBOX: bounding_boxes,
                                  X: rows[X].values,
                                  Y: rows[Y].values,
                                  X_VELOCITY: rows[X_VELOCITY].values,
@@ -239,7 +254,7 @@ def read_static_info(arguments):
     :return: the static dictionary - the key is the track_id and the value is the corresponding data for this track
     """
     # Read the csv file, convert it into a useful data structure
-    df = pandas.read_csv(arguments["input_static_path"])
+    df = pd.read_csv(arguments["input_static_path"])
     
     def class_num(cat):
         if cat == 'Car':
@@ -283,7 +298,7 @@ def read_meta_info(arguments):
     :return: the meta dictionary containing the general information of the video
     """
     # Read the csv file, convert it into a useful data structure
-    df = pandas.read_csv(arguments["input_meta_path"])
+    df = pd.read_csv(arguments["input_meta_path"])
 
     # Declare and initialize the extracted_meta_dictionary
     extracted_meta_dictionary = {ID: int(df[ID][0]),
