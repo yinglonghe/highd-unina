@@ -174,8 +174,8 @@ class WindowGenerator():
     
     
 if __name__ == '__main__':
-    debug_break = False
-    cnt_break = 300
+    debug_break = True
+    cnt_break = 1000
     # Data windowing parameters
     # 1-1-1 (single_step_window), 6-1-1 (conv_window), 24-24-1 (wide_window), 26-24-1 (wide_conv_window) 24-24-24 (multi_window)
     input_width = 4
@@ -192,32 +192,30 @@ if __name__ == '__main__':
 
     print(casedir)
     
-    ### Load HighD dataset
-    df_meta = pd.read_pickle(indir + 'meta.pkl')
-    df_data = pd.read_pickle(indir + 'data.pkl')
-    
-    ### Select data and pre-processing
-    df_truck = df_data.loc[(df_data['class'] == 1) & (df_data['numFrames'] >= 200) & (df_data['numFrames'] <= 500)].reset_index(drop=True)
-    df_car = df_data.loc[(df_data['class'] == 0) & (df_data['numFrames'] >= 200) & (df_data['numFrames'] <= 500)].reset_index(drop=True)
-    df = df_car
-    
-    df_stat = df.loc[:, 'recordingId':'numLaneChanges']
-    df_traj = df.loc[:, 'frame':'traffic_speed']
-    
-    ### Pre-process data
-    del_cols = ['frame', 'precedingId', 'followingId', 'leftFollowingId', 'leftAlongsideId',
-                'leftPrecedingId', 'rightFollowingId', 'rightAlongsideId', 'rightPrecedingId']
+    if not os.path.exists(casedir+'/df_flatten.pkl'):
+        ### Load HighD dataset
+        df_meta = pd.read_pickle(indir + 'meta.pkl')
+        df_data = pd.read_pickle(indir + 'data.pkl')
 
+        ### Select data and pre-processing
+        df_truck = df_data.loc[(df_data['class'] == 1) & (df_data['numFrames'] >= 200) & (df_data['numFrames'] <= 500)].reset_index(drop=True)
+        df_car = df_data.loc[(df_data['class'] == 0) & (df_data['numFrames'] >= 200) & (df_data['numFrames'] <= 500)].reset_index(drop=True)
+        df = df_car
+
+        df_stat = df.loc[:, 'recordingId':'numLaneChanges']
+        df_traj = pd.concat([df.loc[:, 'frame':'traffic_speed'], df.loc[:, 'recordingId':'vehicleId']], axis=1)
+
+    ### Pre-process data
     if os.path.exists(casedir+'/df_flatten.pkl'):
         df_flatten = pd.read_pickle(casedir+'/df_flatten.pkl')
         print('\n df_flatten loaded!')
-
     else:
         df_flatten = pd.DataFrame()
         for idx, row in tqdm(df_traj.iterrows(), total=df_traj.shape[0], mininterval=5):
             df_ = pd.DataFrame()
             for col_name, col_val in row.iteritems():
-                if col_name not in del_cols:
+                if col_name not in ['precedingId', 'followingId', 'leftFollowingId', 'leftAlongsideId',
+                                    'leftPrecedingId', 'rightFollowingId', 'rightAlongsideId', 'rightPrecedingId']:
                     df_[col_name] = col_val
             df_ = df_[5::6]
             if idx == 0:
@@ -228,11 +226,12 @@ if __name__ == '__main__':
             if debug_break and idx == cnt_break:
                 break
 
+        rec_col = df_flatten.pop('recordingId').astype('int')
+        veh_col = df_flatten.pop('vehicleId').astype('int')
+        df_flatten.insert(0, 'recVehId', list(zip(rec_col, veh_col)))
+
         df_flatten.to_pickle(casedir+'/df_flatten.pkl')
         print('\n df_flatten saved!')
-
-    df_mean = df_flatten.mean()
-    df_std = df_flatten.std()
     
     ### Data windowing 
     if os.path.exists(dsdir):
@@ -244,12 +243,11 @@ if __name__ == '__main__':
                             label_columns=['xAcceleration'], column_indices=cols_load)
         print('\n Data loaded!')
     else:
-        for idx, row in tqdm(df_traj.iterrows(), total=df_traj.shape[0], mininterval=10):
-            df_ = pd.DataFrame()
-            for col_name, col_val in row.iteritems():
-                if col_name not in del_cols:
-                    df_[col_name] = col_val
-            df_ = df_[5::6]
+        col_drop = ['recVehId', 'frame']
+        df_mean = df_flatten.drop(col_drop, axis=1).mean()
+        df_std = df_flatten.drop(col_drop, axis=1).std()
+        for idx, val in enumerate(tqdm(df_flatten['recVehId'].unique(), mininterval=10)):
+            df_ = df_flatten.loc[df_flatten['recVehId']==val].drop(col_drop, axis=1)
             df_ = (df_ - df_mean) / df_std
 
             w_ = WindowGenerator(input_width=input_width, label_width=label_width, shift=shift, df=df_,
@@ -259,13 +257,11 @@ if __name__ == '__main__':
             else:
                 w.ds = w.ds.concatenate(w_.ds)
 
-            if debug_break and idx == cnt_break:
-                break
-
-        tf.data.experimental.save(w.ds, dsdir)
-        with open(casedir+'/column_indices.pkl', 'wb') as f:
-            pickle.dump(w.column_indices, f)
-        print('\n Data saved!')
+        print('\n Data created!')
+        # tf.data.experimental.save(w.ds, dsdir, compression='GZIP')
+        # with open(casedir+'/column_indices.pkl', 'wb') as f:
+        #     pickle.dump(w.column_indices, f)
+        # print('\n Data saved!')
 
     w.train, w.val, w.test = w.get_dataset_partitions_tf()
     
