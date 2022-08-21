@@ -20,15 +20,11 @@ os.makedirs(outdir, exist_ok=True)
 ### Package the training procedure into a function
 multi_val_performance = {}
 multi_performance = {}
-MAX_EPOCHS = 20
-def compile_and_fit(model, window, patience=2):
+def model_fit(model, window, max_epochs, patience=2):
     early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss',
                                                       patience=patience,
                                                       mode='min')
-    model.compile(loss=tf.keras.losses.MeanSquaredError(),
-                  optimizer=tf.keras.optimizers.Adam(),
-                  metrics=[tf.keras.metrics.MeanAbsoluteError()])
-    history = model.fit(window.train, epochs=MAX_EPOCHS,
+    history = model.fit(window.train, epochs=max_epochs,
                         validation_data=window.val,
                         verbose=2,
                         callbacks=[early_stopping])
@@ -186,10 +182,15 @@ if __name__ == '__main__':
     label_width = 1
     shift = 1
 
-    dsdir = outdir+f'saved_data-{input_width}_{label_width}_{shift}'
-    coldir = dsdir+'/column_indices.pkl'
-    modeldir = outdir+f'saved_model-{input_width}_{label_width}_{shift}'
-    print(modeldir)
+    MAX_EPOCHS = 20
+    
+    casedir = outdir+f'{input_width}_{label_width}_{shift}'
+    os.makedirs(casedir, exist_ok=True)
+
+    dsdir = casedir+'/saved_data'
+    modeldir = casedir+'/saved_model'
+
+    print(casedir)
     
     ### Load HighD dataset
     df_meta = pd.read_pickle(indir + 'meta.pkl')
@@ -203,74 +204,91 @@ if __name__ == '__main__':
     df_stat = df.loc[:, 'recordingId':'numLaneChanges']
     df_traj = df.loc[:, 'frame':'traffic_speed']
     
+    ### Pre-process data
     del_cols = ['frame', 'precedingId', 'followingId', 'leftFollowingId', 'leftAlongsideId',
                 'leftPrecedingId', 'rightFollowingId', 'rightAlongsideId', 'rightPrecedingId']
 
-    df_flatten = pd.DataFrame()
-    for idx, row in tqdm(df_traj.iterrows(), total=df_traj.shape[0], mininterval=5):
-        df_ = pd.DataFrame()
-        for col_name, col_val in row.iteritems():
-            if col_name not in del_cols:
-                df_[col_name] = col_val
-        df_ = df_[5::6]
-        if idx == 0:
-            df_flatten = df_
-        else:
-            df_flatten = pd.concat([df_flatten, df_])
-        
-        if debug_break and idx == cnt_break:
-            break
-            
+    if os.path.exists(casedir+'/df_flatten.pkl'):
+        df_flatten = pd.read_pickle(casedir+'/df_flatten.pkl')
+        print('\n df_flatten loaded!')
+
+    else:
+        df_flatten = pd.DataFrame()
+        for idx, row in tqdm(df_traj.iterrows(), total=df_traj.shape[0], mininterval=5):
+            df_ = pd.DataFrame()
+            for col_name, col_val in row.iteritems():
+                if col_name not in del_cols:
+                    df_[col_name] = col_val
+            df_ = df_[5::6]
+            if idx == 0:
+                df_flatten = df_
+            else:
+                df_flatten = pd.concat([df_flatten, df_])
+
+            if debug_break and idx == cnt_break:
+                break
+
+        df_flatten.to_pickle(casedir+'/df_flatten.pkl')
+        print('\n df_flatten saved!')
+
     df_mean = df_flatten.mean()
     df_std = df_flatten.std()
     
     ### Data windowing 
-    # """
-    for idx, row in tqdm(df_traj.iterrows(), total=df_traj.shape[0], mininterval=10):
-        df_ = pd.DataFrame()
-        for col_name, col_val in row.iteritems():
-            if col_name not in del_cols:
-                df_[col_name] = col_val
-        df_ = df_[5::6]
-        df_ = (df_ - df_mean) / df_std
-        
-        w_ = WindowGenerator(input_width=input_width, label_width=label_width, shift=shift, df=df_,
-                             label_columns=['xAcceleration'])
-        if idx == 0:
-            w = w_
-        else:
-            w.ds = w.ds.concatenate(w_.ds)
-            
-        if debug_break and idx == cnt_break:
-            break
-    # """
-    ### Data loading (skip)
-    """
-    ds_load = tf.data.experimental.load(dsdir)
-    with open(coldir, 'rb') as f:
-        cols_load = pickle.load(f)
+    if os.path.exists(dsdir):
+        ds_load = tf.data.experimental.load(dsdir)
+        with open(casedir+'/column_indices.pkl', 'rb') as f:
+            cols_load = pickle.load(f)
 
-    w = WindowGenerator(input_width=input_width, label_width=label_width, shift=shift, ds=ds_load,
-                        label_columns=['xAcceleration'], column_indices=cols_load)
-    print('Data loaded!')
-    """
-    
-    ### Split the dataset
-    
+        w = WindowGenerator(input_width=input_width, label_width=label_width, shift=shift, ds=ds_load,
+                            label_columns=['xAcceleration'], column_indices=cols_load)
+        print('\n Data loaded!')
+    else:
+        for idx, row in tqdm(df_traj.iterrows(), total=df_traj.shape[0], mininterval=10):
+            df_ = pd.DataFrame()
+            for col_name, col_val in row.iteritems():
+                if col_name not in del_cols:
+                    df_[col_name] = col_val
+            df_ = df_[5::6]
+            df_ = (df_ - df_mean) / df_std
+
+            w_ = WindowGenerator(input_width=input_width, label_width=label_width, shift=shift, df=df_,
+                                 label_columns=['xAcceleration'])
+            if idx == 0:
+                w = w_
+            else:
+                w.ds = w.ds.concatenate(w_.ds)
+
+            if debug_break and idx == cnt_break:
+                break
+
+        tf.data.experimental.save(w.ds, dsdir)
+        with open(casedir+'/column_indices.pkl', 'wb') as f:
+            pickle.dump(w.column_indices, f)
+        print('\n Data saved!')
+
     w.train, w.val, w.test = w.get_dataset_partitions_tf()
     
     ### Traing neural networks
     num_features = len(w.column_indices)
     OUT_STEPS = w.label_width
-    
-    multi_lstm_model = tf.keras.Sequential([
-        tf.keras.layers.LSTM(32, return_sequences=False),
-        tf.keras.layers.Dense(OUT_STEPS*num_features,
-                              kernel_initializer=tf.initializers.zeros()),
-        tf.keras.layers.Reshape([OUT_STEPS, num_features])
-    ])
 
-    history, model = compile_and_fit(multi_lstm_model, w)
+    if os.path.exists(modeldir+'/my_model'):
+        multi_lstm_model = tf.keras.models.load_model(modeldir+'/my_model')
+        print('\n Model loaded!')
+    else:
+        multi_lstm_model = tf.keras.Sequential([
+            tf.keras.layers.LSTM(32, return_sequences=False),
+            tf.keras.layers.Dense(OUT_STEPS*num_features,
+                                  kernel_initializer=tf.initializers.zeros()),
+            tf.keras.layers.Reshape([OUT_STEPS, num_features])
+        ])
+        multi_lstm_model.compile(loss=tf.keras.losses.MeanSquaredError(),
+                  optimizer=tf.keras.optimizers.Adam(),
+                  metrics=[tf.keras.metrics.MeanAbsoluteError()])
+        print('\n Model created!')
+        
+    history, model = model_fit(multi_lstm_model, w, MAX_EPOCHS)
 
     # IPython.display.clear_output()
 
@@ -279,13 +297,5 @@ if __name__ == '__main__':
 
     model.summary()
     model.save(modeldir+'/my_model')
-    print('Model saved!')
+    print('\n Model saved!')
     # w.plot(model)
-    
-    ### Data Saving
-    # """
-    tf.data.experimental.save(w.ds, dsdir)
-    with open(coldir, 'wb') as f:
-        pickle.dump(w.column_indices, f)
-    print('Data saved!')
-    # """
