@@ -8,14 +8,11 @@ import tensorflow as tf
 import IPython
 import IPython.display
 import pickle
-from copy import deepcopy
 
 
 ### Define global variables
 indir = './outputs/tracks-slurm/'
 outdir = './outputs/tracks-nns/'
-os.makedirs(outdir, exist_ok=True)
-
 
 ### Package the training procedure into a function
 multi_val_performance = {}
@@ -26,7 +23,7 @@ def model_fit(model, window, max_epochs, patience=2):
                                                       mode='min')
     history = model.fit(window.train, epochs=max_epochs,
                         validation_data=window.val,
-                        verbose=2,
+                        verbose=1,
                         callbacks=[early_stopping])
     return history, model
 
@@ -141,11 +138,11 @@ class WindowGenerator():
         plt.xlabel('Step')
     
     
-    def get_dataset_partitions_tf(self, train_split=0.7, val_split=0.2, test_split=0.1, shuffle=True, shuffle_size=100):
+    def get_dataset_partitions_tf(self, ds_size, train_split=0.7, val_split=0.2, test_split=0.1, shuffle=True, shuffle_size=1000):
         
         assert (train_split + test_split + val_split) == 1
         
-        ds_size = len(list(self.ds))
+        # ds_size = len(list(self.ds))
         
         if shuffle:
             # Specify seed to always have the same split distribution between runs
@@ -174,17 +171,18 @@ class WindowGenerator():
     
     
 if __name__ == '__main__':
-    debug_break = True
-    cnt_break = 1000
+    debug_break = False
+    cnt_break = 200
     # Data windowing parameters
     # 1-1-1 (single_step_window), 6-1-1 (conv_window), 24-24-1 (wide_window), 26-24-1 (wide_conv_window) 24-24-24 (multi_window)
-    input_width = 4
-    label_width = 1
-    shift = 1
+    input_width = 8
+    label_width = 4
+    shift = 4
 
-    MAX_EPOCHS = 20
+    MAX_EPOCHS = 3 if debug_break else 30
     
-    casedir = outdir+f'{input_width}_{label_width}_{shift}'
+    locationId = 6
+    casedir = outdir+f'loc{locationId}_car_{input_width}_{label_width}_{shift}'
     os.makedirs(casedir, exist_ok=True)
 
     dsdir = casedir+'/saved_data'
@@ -200,11 +198,17 @@ if __name__ == '__main__':
         ### Select data and pre-processing
         df_truck = df_data.loc[(df_data['class'] == 1) & (df_data['numFrames'] >= 200) & (df_data['numFrames'] <= 500)].reset_index(drop=True)
         df_car = df_data.loc[(df_data['class'] == 0) & (df_data['numFrames'] >= 200) & (df_data['numFrames'] <= 500)].reset_index(drop=True)
+        
         df = df_car
-
+        recIdSet = df_meta.loc[df_meta['locationId']==locationId, 'recordingId'].to_list()
+        df = df.loc[df['recordingId'].isin(recIdSet)]
+        print(f'\n recIdSet={recIdSet}')
+        
         df_stat = df.loc[:, 'recordingId':'numLaneChanges']
         df_traj = pd.concat([df.loc[:, 'frame':'traffic_speed'], df.loc[:, 'recordingId':'vehicleId']], axis=1)
-
+        
+        del df_meta, df_data, df_truck, df_car, df, df_stat
+        
     ### Pre-process data
     if os.path.exists(casedir+'/df_flatten.pkl'):
         df_flatten = pd.read_pickle(casedir+'/df_flatten.pkl')
@@ -232,10 +236,14 @@ if __name__ == '__main__':
 
         df_flatten.to_pickle(casedir+'/df_flatten.pkl')
         print('\n df_flatten saved!')
+        print(f'\n df_flatten length: {len(df_flatten)}')
+        del df_traj
     
     ### Data windowing 
     if os.path.exists(dsdir):
         ds_load = tf.data.experimental.load(dsdir)
+        with open(casedir+'/ds_size.txt', 'r') as f:
+            ds_size = int(f.readline())
         with open(casedir+'/column_indices.pkl', 'rb') as f:
             cols_load = pickle.load(f)
 
@@ -246,26 +254,36 @@ if __name__ == '__main__':
         col_drop = ['recVehId', 'frame']
         df_mean = df_flatten.drop(col_drop, axis=1).mean()
         df_std = df_flatten.drop(col_drop, axis=1).std()
-        for idx, val in enumerate(tqdm(df_flatten['recVehId'].unique(), mininterval=10)):
+        ds_size = 0
+        w = None
+        for val in tqdm(df_flatten['recVehId'].unique(), mininterval=10):
             df_ = df_flatten.loc[df_flatten['recVehId']==val].drop(col_drop, axis=1)
             df_ = (df_ - df_mean) / df_std
 
             w_ = WindowGenerator(input_width=input_width, label_width=label_width, shift=shift, df=df_,
                                  label_columns=['xAcceleration'])
-            if idx == 0:
+            ds_size += len(list(w_.ds))
+            if w == None:
                 w = w_
+                print(w)
             else:
                 w.ds = w.ds.concatenate(w_.ds)
-
+        
+        del df_flatten
         print('\n Data created!')
-        # tf.data.experimental.save(w.ds, dsdir, compression='GZIP')
-        # with open(casedir+'/column_indices.pkl', 'wb') as f:
-        #     pickle.dump(w.column_indices, f)
-        # print('\n Data saved!')
+        print(f'\n Dataset size: {ds_size}')
+        tf.data.experimental.save(w.ds, dsdir)
+        with open(casedir+'/ds_size.txt', 'w') as f:
+            f.write('%d' % ds_size)
+        with open(casedir+'/column_indices.pkl', 'wb') as f:
+            pickle.dump(w.column_indices, f)
+        print('\n Data saved!')
 
-    w.train, w.val, w.test = w.get_dataset_partitions_tf()
+    w.train, w.val, w.test = w.get_dataset_partitions_tf(ds_size)
+    print('\n Data splitted!')
     
     ### Traing neural networks
+    """
     num_features = len(w.column_indices)
     OUT_STEPS = w.label_width
 
@@ -280,10 +298,10 @@ if __name__ == '__main__':
             tf.keras.layers.Reshape([OUT_STEPS, num_features])
         ])
         multi_lstm_model.compile(loss=tf.keras.losses.MeanSquaredError(),
-                  optimizer=tf.keras.optimizers.Adam(),
-                  metrics=[tf.keras.metrics.MeanAbsoluteError()])
+                      optimizer=tf.keras.optimizers.Adam(),
+                      metrics=[tf.keras.metrics.MeanAbsoluteError()])
         print('\n Model created!')
-        
+
     history, model = model_fit(multi_lstm_model, w, MAX_EPOCHS)
 
     # IPython.display.clear_output()
@@ -295,3 +313,4 @@ if __name__ == '__main__':
     model.save(modeldir+'/my_model')
     print('\n Model saved!')
     # w.plot(model)
+    """
